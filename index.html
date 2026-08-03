@@ -1014,7 +1014,7 @@ function searchCoins(query, isWatch=false){
   const matches = coinList.filter(c => c.name.toLowerCase().includes(q) || c.symbol.toLowerCase().includes(q)).slice(0,8);
   if(!matches.length){ resultsEl.innerHTML = '<div class="search-item text-faint">No matches</div>'; resultsEl.classList.add('show'); return; }
   resultsEl.innerHTML = matches.map(c => `
-    <div class="search-item" onclick='${isWatch ? `addToWatchlist('${c.id}')` : `selectCoin('${c.id}')`}'>
+    <div class="search-item" onclick="${isWatch ? `addToWatchlist('${c.id}')` : `selectCoin('${c.id}')`}">
       <img src="${c.image}" onerror="this.style.display='none'">
       <span class="name">${c.name}</span>
       <span class="sym">${c.symbol}</span>
