@@ -336,6 +336,7 @@ footer{text-align:center;color:var(--text-faint);font-size:12px;padding:30px 0 1
     <button class="tab-btn" data-tab="holdings">Holdings</button>
     <button class="tab-btn" data-tab="transactions">Transactions</button>
     <button class="tab-btn" data-tab="news">News & Sentiment</button>
+    <button class="tab-btn" data-tab="reviewer">AI Reviewer</button>
     <button class="tab-btn" data-tab="watchlist">Watchlist</button>
     <button class="tab-btn" data-tab="settings">Settings</button>
   </nav>
@@ -496,6 +497,44 @@ footer{text-align:center;color:var(--text-faint);font-size:12px;padding:30px 0 1
     </div>
   </section>
 
+  <!-- AI REVIEWER -->
+  <section class="tab-panel" id="tab-reviewer">
+    <div class="card" style="margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+      <div>
+        <div class="section-title" style="margin-bottom:2px;"><h3>Automated Portfolio Reviewer</h3></div>
+        <div class="text-faint" style="font-size:12.5px;">Generated from your trades, live prices, sentiment and market data. Not financial advice.</div>
+      </div>
+      <button class="btn btn-sm btn-primary" onclick="renderAIReviewer(true)">⟳ Refresh Review</button>
+    </div>
+
+    <div class="grid grid-2">
+      <div class="card">
+        <div class="section-title"><h3>🔆 Daily Update</h3><span class="text-faint" style="font-size:11.5px;" id="dailyUpdateDate"></span></div>
+        <div id="dailyUpdateBody" style="font-size:13.5px;line-height:1.75;color:var(--text-dim);">Add a trade to generate your first daily update.</div>
+      </div>
+      <div class="card">
+        <div class="section-title"><h3>📅 Monthly Overview</h3></div>
+        <div id="monthlyOverviewBody" style="font-size:13.5px;line-height:1.75;color:var(--text-dim);">History builds up the longer you use Ember — check back after a few days.</div>
+      </div>
+    </div>
+
+    <div class="grid grid-2 mt-4">
+      <div class="card">
+        <div class="section-title"><h3>⚖️ Asset Allocation Advice</h3></div>
+        <div id="allocAdviceBody" style="font-size:13.5px;line-height:1.75;color:var(--text-dim);"></div>
+      </div>
+      <div class="card">
+        <div class="section-title"><h3>🧭 Assets You Might Consider</h3></div>
+        <div id="investIdeasBody" style="font-size:13.5px;line-height:1.75;color:var(--text-dim);"></div>
+      </div>
+    </div>
+
+    <div class="analysis-box mt-4" style="background:var(--card);">
+      <span class="ico">ℹ️</span>
+      <div class="text-faint">This reviewer applies fixed rules (concentration limits, market-cap tiers, momentum, sentiment) to your own data and public market data — it is not AI-generated commentary and isn't personalized investment advice. Always do your own research or speak to a licensed financial advisor before acting on it.</div>
+    </div>
+  </section>
+
   <!-- WATCHLIST -->
   <section class="tab-panel" id="tab-watchlist">
     <div class="card">
@@ -619,7 +658,8 @@ let state = {
   theme: 'dark',
   refreshInterval: 60,
   transactions: [],
-  watchlist: []
+  watchlist: [],
+  history: []   // daily snapshots: { date:'YYYY-MM-DD', value, invested } — builds up as you use Ember
 };
 let coinList = [];          // top market coins for search
 let priceCache = {};        // id -> {usd, usd_24h_change, inr, inr_24h_change, image}
@@ -823,31 +863,94 @@ function renderFng(){
   document.getElementById('fngMarker').style.left = val + '%';
 }
 
-/* ============ API: NEWS ============ */
+/* ============ API: NEWS (with fallbacks) ============ */
+let latestNews = []; // normalized cache used by News tab + AI Reviewer
+
+function fetchWithTimeout(url, ms=8000){
+  const ctrl = new AbortController();
+  const t = setTimeout(()=>ctrl.abort(), ms);
+  return fetch(url, {signal: ctrl.signal}).finally(()=>clearTimeout(t));
+}
+
+async function tryCryptoCompareV2(){
+  const res = await fetchWithTimeout('https://min-api.cryptocompare.com/data/v2/news/?lang=EN');
+  if(!res.ok) throw new Error('CC v2 status ' + res.status);
+  const json = await res.json();
+  const items = json.Data || json.data || [];
+  if(!items.length) throw new Error('CC v2 empty');
+  return items.map(n => ({
+    title: n.title,
+    url: n.url || n.guid,
+    image: n.imageurl,
+    source: n.source_info?.name || n.source || 'Source',
+    date: new Date((n.published_on || n.published_on_ns/1e9 || Date.now()/1000) * 1000),
+    categories: (n.categories||'').split('|').filter(Boolean).slice(0,3)
+  }));
+}
+async function tryCryptoCompareDataApi(){
+  const res = await fetchWithTimeout('https://data-api.cryptocompare.com/news/v1/article/list?lang=EN&limit=20');
+  if(!res.ok) throw new Error('CC data-api status ' + res.status);
+  const json = await res.json();
+  const items = json.Data || [];
+  if(!items.length) throw new Error('CC data-api empty');
+  return items.map(n => ({
+    title: n.TITLE || n.title,
+    url: n.URL || n.url,
+    image: n.IMAGE_URL || n.imageurl,
+    source: n.SOURCE_DATA?.NAME || n.source || 'Source',
+    date: new Date((n.PUBLISHED_ON || Date.now()/1000) * 1000),
+    categories: (n.CATEGORY_DATA||[]).map(c=>c.NAME).slice(0,3)
+  }));
+}
+async function tryCoinGeckoStatus(){
+  // last-resort fallback so something real still shows even if both news APIs are blocked
+  const res = await fetchWithTimeout('https://api.coingecko.com/api/v3/news');
+  if(!res.ok) throw new Error('CG news status ' + res.status);
+  const json = await res.json();
+  const items = json.data || [];
+  if(!items.length) throw new Error('CG news empty');
+  return items.map(n => ({
+    title: n.title, url: n.url, image: n.thumb_2x || n.thumb,
+    source: n.news_site || n.author || 'Source',
+    date: new Date(n.updated_at || Date.now()),
+    categories: []
+  }));
+}
+
 async function loadNews(){
   const el = document.getElementById('newsList');
   el.innerHTML = '<div class="text-faint" style="font-size:13px;">Loading latest news…</div>';
-  try{
-    const res = await fetch('https://min-api.cryptocompare.com/data/v2/news/?lang=EN');
-    const json = await res.json();
-    const items = (json.Data || []).slice(0, 12);
-    if(!items.length){ el.innerHTML = '<div class="text-faint" style="font-size:13px;">No news available right now.</div>'; return; }
-    el.innerHTML = items.map(n => {
-      const cats = (n.categories||'').split('|').filter(Boolean).slice(0,3);
-      const date = new Date(n.published_on * 1000);
-      return `<div class="news-item">
-        <img src="${n.imageurl}" class="news-thumb" onerror="this.style.display='none'">
-        <div style="flex:1;min-width:0;">
-          <div class="news-badges">${cats.map(c=>`<span class="badge">${c}</span>`).join('')}</div>
-          <h4><a href="${n.url}" target="_blank" rel="noopener">${escapeHtml(n.title)}</a></h4>
-          <div class="news-meta">${n.source_info?.name || n.source || 'Source'} · ${timeAgo(date)}</div>
-        </div>
-      </div>`;
-    }).join('');
-  }catch(e){
-    el.innerHTML = '<div class="text-faint" style="font-size:13px;">Could not load news right now — check your connection and try refresh.</div>';
-    console.warn('News failed', e);
+  const attempts = [tryCryptoCompareV2, tryCryptoCompareDataApi, tryCoinGeckoStatus];
+  let items = null, lastErr = null;
+  for(const fn of attempts){
+    try{ items = await fn(); if(items && items.length) break; }
+    catch(e){ lastErr = e; console.warn(fn.name, 'failed:', e.message || e); }
   }
+  if(!items || !items.length){
+    latestNews = [];
+    el.innerHTML = `
+      <div class="text-faint" style="font-size:13px;line-height:1.7;">
+        Live news couldn't load right now — this is usually a temporary block on the news API from this browser/network, not a bug in Ember.
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+        <button class="btn btn-sm" onclick="loadNews()">⟳ Try again</button>
+        <a class="btn btn-sm" href="https://www.coindesk.com" target="_blank" rel="noopener">CoinDesk ↗</a>
+        <a class="btn btn-sm" href="https://cointelegraph.com" target="_blank" rel="noopener">Cointelegraph ↗</a>
+        <a class="btn btn-sm" href="https://decrypt.co" target="_blank" rel="noopener">Decrypt ↗</a>
+      </div>`;
+    renderAIReviewer();
+    return;
+  }
+  latestNews = items.slice(0, 15);
+  el.innerHTML = latestNews.map(n => `<div class="news-item">
+      <img src="${n.image||''}" class="news-thumb" onerror="this.style.display='none'">
+      <div style="flex:1;min-width:0;">
+        <div class="news-badges">${n.categories.map(c=>`<span class="badge">${escapeHtml(c)}</span>`).join('')}</div>
+        <h4><a href="${n.url}" target="_blank" rel="noopener">${escapeHtml(n.title)}</a></h4>
+        <div class="news-meta">${escapeHtml(n.source)} · ${timeAgo(n.date)}</div>
+      </div>
+    </div>`).join('');
+  renderAIReviewer();
 }
 function escapeHtml(s){ const d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; }
 function timeAgo(date){
@@ -1054,6 +1157,7 @@ function computeTotalRealizedPnL(){
 
 /* ============ RENDER ALL ============ */
 function renderAll(){
+  recordDailySnapshot();
   renderHero();
   renderHoldings();
   renderTransactions();
@@ -1063,6 +1167,179 @@ function renderAll(){
   renderFng();
   renderGlobal();
   loadTrending();
+  renderAIReviewer();
+}
+
+/* ============ DAILY SNAPSHOT HISTORY ============ */
+function currentPortfolioValue(){
+  let total = 0;
+  computeHoldings().forEach(h => { const p = getPrice(h.id); if(p!==null) total += h.qty*p; });
+  return total;
+}
+function recordDailySnapshot(){
+  const today = new Date().toISOString().split('T')[0];
+  const holdings = computeHoldings();
+  const value = currentPortfolioValue();
+  const invested = holdings.reduce((s,h)=>s+h.costBasis,0);
+  const last = state.history[state.history.length-1];
+  if(last && last.date === today){
+    last.value = value; last.invested = invested; // keep today's entry fresh
+  } else {
+    state.history.push({date: today, value, invested});
+    if(state.history.length > 400) state.history = state.history.slice(-400);
+  }
+  saveState();
+}
+
+/* ============ AI REVIEWER (rule-based) ============ */
+function renderAIReviewer(){
+  renderDailyUpdate();
+  renderMonthlyOverview();
+  renderAllocAdvice();
+  renderInvestIdeas();
+}
+
+function renderDailyUpdate(){
+  const el = document.getElementById('dailyUpdateBody');
+  document.getElementById('dailyUpdateDate').textContent = new Date().toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
+  const holdings = computeHoldings();
+  if(!holdings.length){
+    el.innerHTML = 'Add your first trade to start getting daily updates on your portfolio.';
+    return;
+  }
+  const totalValue = currentPortfolioValue();
+  const hist = state.history;
+  const prev = hist.length >= 2 ? hist[hist.length-2] : null;
+  const dayChange = prev && prev.value > 0 ? ((totalValue - prev.value)/prev.value)*100 : null;
+
+  let best=null,worst=null;
+  holdings.forEach(h=>{
+    const c = getChange24h(h.id);
+    if(c===null) return;
+    if(!best || c>best.c) best={h,c};
+    if(!worst || c<worst.c) worst={h,c};
+  });
+
+  let lines = [];
+  lines.push(`Portfolio value is currently <b class="mono">${fmtMoney(totalValue)}</b>${dayChange!==null?` — <span class="${dayChange>=0?'up':'down'}">${fmtPct(dayChange)}</span> since your last visit.`:'.'}`);
+  if(best) lines.push(`<b>${best.h.name}</b> is your top mover today (<span class="${best.c>=0?'up':'down'}">${fmtPct(best.c)}</span>).`);
+  if(worst && worst.h.id !== best?.h?.id) lines.push(`<b>${worst.h.name}</b> is lagging today (<span class="${worst.c>=0?'up':'down'}">${fmtPct(worst.c)}</span>).`);
+  if(fngData) lines.push(`Market sentiment: <b>${fngData.value_classification}</b> (${fngData.value}/100).`);
+
+  // cross-reference news headlines with held coin names/symbols
+  if(latestNews.length){
+    const heldTerms = holdings.map(h=>({name:h.name.toLowerCase(), sym:h.symbol.toLowerCase(), display:h.name}));
+    const relevant = latestNews.filter(n=>{
+      const t = n.title.toLowerCase();
+      return heldTerms.some(term => t.includes(term.name) || new RegExp(`\\b${term.sym}\\b`).test(t));
+    }).slice(0,3);
+    if(relevant.length){
+      lines.push(`Relevant headlines for your holdings: ` + relevant.map(n=>`<a href="${n.url}" target="_blank" rel="noopener">${escapeHtml(n.title)}</a>`).join(' · '));
+    }
+  }
+  el.innerHTML = lines.map(l=>`<div style="margin-bottom:8px;">${l}</div>`).join('');
+}
+
+function renderMonthlyOverview(){
+  const el = document.getElementById('monthlyOverviewBody');
+  const holdings = computeHoldings();
+  if(!holdings.length && !state.transactions.length){
+    el.innerHTML = 'Your monthly overview will appear once you start logging trades.';
+    return;
+  }
+  const cutoff = Date.now() - 30*24*60*60*1000;
+  const windowHist = state.history.filter(h => new Date(h.date).getTime() >= cutoff);
+  const recentTx = state.transactions.filter(t => new Date(t.date).getTime() >= cutoff);
+  const buys = recentTx.filter(t=>t.type==='buy').length;
+  const sells = recentTx.filter(t=>t.type==='sell'||t.type==='reduce').length;
+  const netInvested = recentTx.filter(t=>t.type==='buy').reduce((s,t)=>s+t.quantity*t.price+(t.fee||0),0)
+                     - recentTx.filter(t=>t.type==='sell'||t.type==='reduce').reduce((s,t)=>s+t.quantity*t.price,0);
+
+  let lines = [];
+  if(windowHist.length >= 2){
+    const first = windowHist[0], lastEntry = windowHist[windowHist.length-1];
+    const pct = first.value>0 ? ((lastEntry.value-first.value)/first.value)*100 : 0;
+    lines.push(`Over the last ${windowHist.length} tracked day${windowHist.length===1?'':'s'}, your portfolio moved <b class="${pct>=0?'up':'down'}">${fmtPct(pct)}</b> (${fmtMoney(first.value)} → ${fmtMoney(lastEntry.value)}).`);
+  } else {
+    lines.push(`Only ${windowHist.length} day${windowHist.length===1?'':'s'} of history recorded so far — Ember snapshots your portfolio automatically each day you open it, so this section gets more useful over time.`);
+  }
+  lines.push(`In the last 30 days you logged <b>${buys}</b> buy${buys===1?'':'s'} and <b>${sells}</b> sell/reduce${sells===1?'':'s'}, for a net ${netInvested>=0?'inflow':'outflow'} of <b class="mono">${fmtMoney(Math.abs(netInvested))}</b>.`);
+  el.innerHTML = lines.map(l=>`<div style="margin-bottom:8px;">${l}</div>`).join('');
+}
+
+function renderAllocAdvice(){
+  const el = document.getElementById('allocAdviceBody');
+  const holdings = computeHoldings();
+  const totalValue = currentPortfolioValue();
+  if(!holdings.length || totalValue<=0){
+    el.innerHTML = 'Add holdings to get allocation and diversification advice.';
+    return;
+  }
+  const withAlloc = holdings.map(h=>{
+    const p = getPrice(h.id)||0;
+    return { ...h, value:h.qty*p, alloc:(h.qty*p/totalValue)*100 };
+  }).sort((a,b)=>b.alloc-a.alloc);
+  const top = withAlloc[0];
+  let lines = [];
+
+  if(top.alloc > 60){
+    lines.push(`⚠️ <b>${top.name}</b> makes up <b>${top.alloc.toFixed(1)}%</b> of your portfolio — this is a high concentration. A move against this single asset would heavily affect your total value.`);
+  } else if(top.alloc > 35){
+    lines.push(`<b>${top.name}</b> is your largest position at <b>${top.alloc.toFixed(1)}%</b> — moderate concentration. Worth keeping an eye on.`);
+  } else {
+    lines.push(`Your largest position (<b>${top.name}</b>) is <b>${top.alloc.toFixed(1)}%</b> of the portfolio — reasonably balanced.`);
+  }
+
+  if(withAlloc.length < 3){
+    lines.push(`You currently hold <b>${withAlloc.length}</b> asset${withAlloc.length===1?'':'s'}. Spreading across more assets can reduce the impact of any single coin underperforming.`);
+  } else {
+    lines.push(`You're spread across <b>${withAlloc.length}</b> assets, which gives some built-in diversification.`);
+  }
+
+  // large-cap vs smaller-cap exposure using coinList rank
+  let largeCapVal = 0, smallCapVal = 0, unknownVal = 0;
+  withAlloc.forEach(h=>{
+    const meta = coinList.find(c=>c.id===h.id);
+    if(!meta){ unknownVal += h.value; return; }
+    // rely on position in sorted coinList (already market-cap ordered) as proxy for rank
+    const idx = coinList.findIndex(c=>c.id===h.id);
+    if(idx>=0 && idx < 20) largeCapVal += h.value; else smallCapVal += h.value;
+  });
+  const smallPct = totalValue>0 ? (smallCapVal/totalValue)*100 : 0;
+  if(smallPct > 50){
+    lines.push(`<b>${smallPct.toFixed(0)}%</b> of your portfolio sits outside the top-20 coins by market cap — this typically means higher volatility and liquidity risk alongside higher upside potential.`);
+  } else if(largeCapVal > 0){
+    lines.push(`The majority of your value is in top-20 market-cap assets, which tend to be more liquid and less volatile than smaller-cap coins.`);
+  }
+
+  el.innerHTML = lines.map(l=>`<div style="margin-bottom:8px;">${l}</div>`).join('');
+}
+
+function renderInvestIdeas(){
+  const el = document.getElementById('investIdeasBody');
+  if(!coinList.length){
+    el.innerHTML = 'Market data still loading — check back in a moment.';
+    return;
+  }
+  const heldIds = new Set(computeHoldings().map(h=>h.id));
+  const topUnheld = coinList.filter(c => !heldIds.has(c.id)).slice(0,20).filter(c=>!heldIds.has(c.id)).slice(0,5);
+  let lines = [];
+  if(topUnheld.length){
+    lines.push(`<div style="margin-bottom:6px;">Established, top-market-cap assets you don't currently hold:</div>`);
+    lines.push(`<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;">` + topUnheld.map(c=>
+      `<span class="badge" style="font-size:11.5px;padding:5px 10px;">${c.name} (${c.symbol.toUpperCase()})</span>`
+    ).join('') + `</div>`);
+  }
+  const momentum = [...coinList].filter(c=>!heldIds.has(c.id) && c.change24h!==null && c.change24h!==undefined)
+    .sort((a,b)=>b.change24h-a.change24h).slice(0,4);
+  if(momentum.length){
+    lines.push(`<div style="margin-bottom:6px;">Showing strongest momentum today (higher risk):</div>`);
+    lines.push(`<div style="display:flex;flex-wrap:wrap;gap:8px;">` + momentum.map(c=>
+      `<span class="badge" style="font-size:11.5px;padding:5px 10px;color:var(--gold);border-color:var(--gold);">${c.symbol.toUpperCase()} ${fmtPct(c.change24h)}</span>`
+    ).join('') + `</div>`);
+  }
+  if(!lines.length){ lines.push('No suggestions available right now.'); }
+  el.innerHTML = lines.join('');
 }
 
 function renderHero(){
